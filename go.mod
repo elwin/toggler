@@ -1,4 +1,4 @@
-module toggl
+module github.com/elwin/toggler
 
 go 1.18
 
