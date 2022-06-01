@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/olekukonko/tablewriter"
 	"github.com/samber/lo"
 	"github.com/urfave/cli/v2"
 )
@@ -59,26 +61,24 @@ func roundEntries(apiToken string, apply bool, rounding, timeframe time.Duration
 		return err
 	}
 
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"ID", "Description", "Start Time", "Old Duration", "New Duration"})
+
 	lo.ForEach(timeEntries, func(entry TimeEntry, _ int) {
-		oldDuration := time.Duration(entry.Duration) * time.Second
-
-		fmt.Println(entry.Start.String())
-
-		expectedDuration := entry.Stop.Sub(entry.Start)
-		if expectedDuration != oldDuration {
-			fmt.Println("inconsistent duration, taking stop-start")
-			oldDuration = expectedDuration
-		} else {
-			fmt.Println("consistent duration")
-		}
-
+		oldDuration := entry.Stop.Sub(entry.Start)
 		newDuration := roundUp(oldDuration, rounding)
 		if oldDuration == 0 || oldDuration == newDuration {
 			return
 		}
 
-		fmt.Printf("changing %d (%s) from %s to %s\n", entry.ID, entry.Description, oldDuration, newDuration)
+		// fmt.Printf("changing %d (%s) from %s to %s\n", entry.ID, entry.Description, oldDuration, newDuration)
 
+		row := []string{
+			strconv.FormatInt(entry.ID, 10),
+			entry.Description,
+			entry.Start.Format(time.RFC822),
+			oldDuration.String(),
+		}
 		if apply {
 			out, err := json.Marshal(struct {
 				PatchEntry `json:"time_entry"`
@@ -91,39 +91,20 @@ func roundEntries(apiToken string, apply bool, rounding, timeframe time.Duration
 				log.Fatal(err) // TODO change to return
 			}
 
-			fmt.Println(string(out))
-
 			_, err = c.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v8/time_entries/%d", entry.ID))
 			if err != nil {
 				log.Fatal(err) // TODO change to return
 			}
 
-			fmt.Printf("updated %d\n", entry.ID)
+			row = append(row, newDuration.String())
+		} else {
+			row = append(row, "-")
 		}
+
+		table.Append(row)
 	})
 
-	// if apply {
-	// 	for _, entry := range timeEntries {
-	// 		out, err := json.Marshal(struct {
-	// 			PatchEntry `json:"time_entry"`
-	// 		}{
-	// 			PatchEntry{
-	// 				Start: entry.Start,
-	// 				Stop:  entry.Stop,
-	// 			},
-	// 		})
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	//
-	// 		_, err = c.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v8/time_entries/%d", entry.ID))
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	//
-	// 		fmt.Printf("Updated %d\n", entry.ID)
-	// 	}
-	// }
+	table.Render()
 
 	return nil
 }

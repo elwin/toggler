@@ -5,4 +5,4 @@ install:
 	go install
 
 release:
-	goreleaser release
+	goreleaser release --rm-dist
