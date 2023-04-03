@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
@@ -48,15 +49,8 @@ func roundUp(t time.Duration, m time.Duration) time.Duration {
 	return n
 }
 
-func roundEntries(apiToken string, apply bool, rounding, timeframe time.Duration) error {
-	c := resty.New().SetBasicAuth(apiToken, "api_token")
-
-	var timeEntries []TimeEntry
-	startTime := time.Now().Add(-timeframe)
-	params := url.Values{}
-	params.Add("start_date", startTime.Format(time.RFC3339))
-
-	_, err := c.R().SetResult(&timeEntries).Get("https://api.track.toggl.com/api/v8/time_entries?" + params.Encode())
+func roundEntries(client *resty.Client, apply bool, rounding, timeframe time.Duration) error {
+	timeEntries, err := fetchTimeEntries(client, timeframe)
 	if err != nil {
 		return err
 	}
@@ -91,7 +85,7 @@ func roundEntries(apiToken string, apply bool, rounding, timeframe time.Duration
 				log.Fatal(err) // TODO change to return
 			}
 
-			_, err = c.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v8/time_entries/%d", entry.ID))
+			_, err = client.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v8/time_entries/%d", entry.ID))
 			if err != nil {
 				log.Fatal(err) // TODO change to return
 			}
@@ -109,53 +103,164 @@ func roundEntries(apiToken string, apply bool, rounding, timeframe time.Duration
 	return nil
 }
 
+func fetchTimeEntries(client *resty.Client, timeframe time.Duration) ([]TimeEntry, error) {
+	var timeEntries []TimeEntry
+	startTime := time.Now().Add(-timeframe)
+	params := url.Values{}
+	params.Add("start_date", startTime.Format(time.RFC3339))
+
+	_, err := client.R().SetResult(&timeEntries).Get("https://api.track.toggl.com/api/v8/time_entries?" + params.Encode())
+	if err != nil {
+		return nil, err
+	}
+	return timeEntries, nil
+}
+
+func summary(client *resty.Client, timeframe time.Duration, lunchBreak time.Duration, loc *time.Location) error {
+
+	type summaryTime struct {
+		Start    time.Time
+		Duration time.Duration
+	}
+
+	timeEntries, err := fetchTimeEntries(client, timeframe)
+	if err != nil {
+		return err
+	}
+
+	buckets := map[string][]TimeEntry{}
+	for _, entry := range timeEntries {
+		key := entry.Start.Format("2006-01-02")
+		buckets[key] = append(buckets[key], entry)
+	}
+
+	var dayAggregations []summaryTime
+	for _, bucket := range buckets {
+		dayAggregation := summaryTime{}
+
+		for _, entry := range bucket {
+			start := entry.Start.In(loc)
+			stop := entry.Stop.In(loc)
+
+			dayAggregation.Duration = dayAggregation.Duration + stop.Sub(start)
+			if (dayAggregation.Start == time.Time{} || start.Before(dayAggregation.Start)) {
+				dayAggregation.Start = start
+			}
+		}
+
+		dayAggregations = append(dayAggregations, dayAggregation)
+	}
+
+	sort.Slice(dayAggregations, func(i, j int) bool {
+		return dayAggregations[i].Start.Before(dayAggregations[j].Start)
+	})
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Day", "Start Time", "End Time (1h Lunch)", "Duration"})
+
+	for _, entry := range dayAggregations {
+		table.Append([]string{
+			entry.Start.Format("Mon 02. Jan 2006"),
+			entry.Start.Format("15:04"),
+			entry.Start.Add(entry.Duration).Add(lunchBreak).Format("15:04"),
+			entry.Duration.String()},
+		)
+	}
+
+	table.Render()
+
+	return nil
+}
+
 func main() {
 	var (
-		apiToken  string
-		apply     bool
-		rounding  time.Duration
-		timeframe time.Duration
+		apiToken   string
+		apply      bool
+		rounding   time.Duration
+		timeframe  time.Duration
+		lunchBreak time.Duration
+		timezone   string
 	)
+
+	roundCommand := &cli.Command{
+		Name:        "round",
+		Description: "round your time entries in Toggl",
+		Action: func(context *cli.Context) error {
+			c := resty.New().SetBasicAuth(apiToken, "api_token")
+
+			return roundEntries(c, apply, rounding, timeframe)
+		},
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:        "apply",
+				Usage:       "Apply rounding changes",
+				Value:       false,
+				Destination: &apply,
+			},
+			&cli.DurationFlag{
+				Name:        "rounding",
+				Usage:       "Rounding rounding",
+				Value:       5 * time.Minute,
+				Destination: &rounding,
+			},
+			&cli.DurationFlag{
+				Name:        "timeframe",
+				Usage:       "Time frame before now",
+				Value:       24 * 30 * time.Hour,
+				Destination: &timeframe,
+			},
+		},
+	}
+
+	summaryCommand := &cli.Command{
+		Name:        "summary",
+		Description: "Summary of working days",
+		Action: func(context *cli.Context) error {
+			c := resty.New().SetBasicAuth(apiToken, "api_token")
+			loc, err := time.LoadLocation(timezone)
+			if err != nil {
+				return err
+			}
+
+			return summary(c, timeframe, lunchBreak, loc)
+		},
+		Flags: []cli.Flag{
+			&cli.DurationFlag{
+				Name:        "timeframe",
+				Usage:       "Time frame before now",
+				Value:       24 * 30 * time.Hour,
+				Destination: &timeframe,
+			},
+			&cli.DurationFlag{
+				Name:        "lunchbreak",
+				Usage:       "Time taken for lunch",
+				Value:       1 * time.Hour,
+				Destination: &lunchBreak,
+			},
+			&cli.StringFlag{
+				Name:        "timezone",
+				Usage:       "IANA Timezone (https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)",
+				Value:       "Europe/Zurich",
+				Destination: &timezone,
+			},
+		},
+	}
 
 	app := &cli.App{
 		Action: func(ctx *cli.Context) error {
 			return cli.ShowAppHelp(ctx)
 		},
-		Commands: []*cli.Command{
-			{
-				Name:        "round",
-				Description: "round your time entries in Toggl",
-				Action: func(context *cli.Context) error {
-					return roundEntries(apiToken, apply, rounding, timeframe)
-				},
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:        "api_token",
-						Usage:       "API Token for Toggl",
-						EnvVars:     []string{"TOGGL_API_TOKEN"},
-						Required:    true,
-						Destination: &apiToken,
-					},
-					&cli.BoolFlag{
-						Name:        "apply",
-						Usage:       "Apply rounding changes",
-						Value:       false,
-						Destination: &apply,
-					},
-					&cli.DurationFlag{
-						Name:        "rounding",
-						Usage:       "Rounding rounding",
-						Value:       5 * time.Minute,
-						Destination: &rounding,
-					},
-					&cli.DurationFlag{
-						Name:        "timeframe",
-						Usage:       "Time frame before now",
-						Value:       24 * 30 * time.Hour,
-						Destination: &timeframe,
-					},
-				},
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:        "api_token",
+				Usage:       "API Token for Toggl",
+				EnvVars:     []string{"TOGGL_API_TOKEN"},
+				Required:    true,
+				Destination: &apiToken,
 			},
+		},
+		Commands: []*cli.Command{
+			roundCommand, summaryCommand,
 		},
 	}
 
