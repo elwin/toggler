@@ -117,43 +117,12 @@ func fetchTimeEntries(client *resty.Client, timeframe time.Duration) ([]TimeEntr
 }
 
 func summary(client *resty.Client, timeframe time.Duration, lunchBreak time.Duration, loc *time.Location) error {
-
-	type summaryTime struct {
-		Start    time.Time
-		Duration time.Duration
-	}
-
 	timeEntries, err := fetchTimeEntries(client, timeframe)
 	if err != nil {
 		return err
 	}
 
-	buckets := map[string][]TimeEntry{}
-	for _, entry := range timeEntries {
-		key := entry.Start.Format("2006-01-02")
-		buckets[key] = append(buckets[key], entry)
-	}
-
-	var dayAggregations []summaryTime
-	for _, bucket := range buckets {
-		dayAggregation := summaryTime{}
-
-		for _, entry := range bucket {
-			start := entry.Start.In(loc)
-			stop := entry.Stop.In(loc)
-
-			dayAggregation.Duration = dayAggregation.Duration + stop.Sub(start)
-			if (dayAggregation.Start == time.Time{} || start.Before(dayAggregation.Start)) {
-				dayAggregation.Start = start
-			}
-		}
-
-		dayAggregations = append(dayAggregations, dayAggregation)
-	}
-
-	sort.Slice(dayAggregations, func(i, j int) bool {
-		return dayAggregations[i].Start.Before(dayAggregations[j].Start)
-	})
+	dayAggregations := aggregate(timeEntries, "2006-01-02", loc)
 
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Day", "Start Time", "End Time (1h Lunch)", "Duration"})
@@ -163,6 +132,65 @@ func summary(client *resty.Client, timeframe time.Duration, lunchBreak time.Dura
 			entry.Start.Format("Mon 02. Jan 2006"),
 			entry.Start.Format("15:04"),
 			entry.Start.Add(entry.Duration).Add(lunchBreak).Format("15:04"),
+			entry.Duration.String()},
+		)
+	}
+
+	table.Render()
+
+	return nil
+}
+
+type summaryTime struct {
+	Start    time.Time
+	Duration time.Duration
+}
+
+func aggregate(timeEntries []TimeEntry, layout string, loc *time.Location) []summaryTime {
+	buckets := map[string][]TimeEntry{}
+	for _, entry := range timeEntries {
+		key := entry.Start.Format(layout)
+		buckets[key] = append(buckets[key], entry)
+	}
+
+	var agg []summaryTime
+	for _, bucket := range buckets {
+		curAgg := summaryTime{}
+
+		for _, entry := range bucket {
+			start := entry.Start.In(loc)
+			stop := entry.Stop.In(loc)
+
+			curAgg.Duration = curAgg.Duration + stop.Sub(start)
+			if (curAgg.Start == time.Time{} || start.Before(curAgg.Start)) {
+				curAgg.Start = start
+			}
+		}
+
+		agg = append(agg, curAgg)
+	}
+
+	sort.Slice(agg, func(i, j int) bool {
+		return agg[i].Start.Before(agg[j].Start)
+	})
+
+	return agg
+}
+
+func monthlyAggregation(client *resty.Client, timeframe time.Duration, loc *time.Location) error {
+	timeEntries, err := fetchTimeEntries(client, timeframe)
+	if err != nil {
+		return err
+	}
+
+	aggregation := aggregate(timeEntries, "2006-01", loc)
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Month", "Duration"})
+
+	for _, entry := range aggregation {
+		table.Append([]string{
+			entry.Start.Format("Jan 2006"),
 			entry.Duration.String()},
 		)
 	}
@@ -246,6 +274,34 @@ func main() {
 		},
 	}
 
+	aggregationCommand := &cli.Command{
+		Name:        "monthlyAggregation",
+		Description: "Aggregation",
+		Action: func(context *cli.Context) error {
+			c := resty.New().SetBasicAuth(apiToken, "api_token")
+			loc, err := time.LoadLocation(timezone)
+			if err != nil {
+				return err
+			}
+
+			return monthlyAggregation(c, timeframe, loc)
+		},
+		Flags: []cli.Flag{
+			&cli.DurationFlag{
+				Name:        "timeframe",
+				Usage:       "Time frame before now",
+				Value:       24 * 30 * time.Hour,
+				Destination: &timeframe,
+			},
+			&cli.StringFlag{
+				Name:        "timezone",
+				Usage:       "IANA Timezone (https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)",
+				Value:       "Europe/Zurich",
+				Destination: &timezone,
+			},
+		},
+	}
+
 	app := &cli.App{
 		Action: func(ctx *cli.Context) error {
 			return cli.ShowAppHelp(ctx)
@@ -260,7 +316,7 @@ func main() {
 			},
 		},
 		Commands: []*cli.Command{
-			roundCommand, summaryCommand,
+			roundCommand, summaryCommand, aggregationCommand,
 		},
 	}
 
