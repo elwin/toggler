@@ -275,7 +275,7 @@ func main() {
 	}
 
 	aggregationCommand := &cli.Command{
-		Name:        "monthlyAggregation",
+		Name:        "aggregation",
 		Description: "Aggregation",
 		Action: func(context *cli.Context) error {
 			c := resty.New().SetBasicAuth(apiToken, "api_token")
