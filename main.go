@@ -29,10 +29,12 @@ type TimeEntry struct {
 	Duronly     bool      `json:"duronly"`
 	At          time.Time `json:"at"`
 	UID         int       `json:"uid"`
+	WorkspaceId int       `json:"workspace_id"`
 }
 
 type PatchEntry struct {
-	Duration int `json:"duration"`
+	Duration    int    `json:"duration"`
+	CreatedWith string `json:"created_with"`
 }
 
 func (entry TimeEntry) String() string {
@@ -59,6 +61,10 @@ func roundEntries(client *resty.Client, apply bool, rounding, timeframe time.Dur
 	table.SetHeader([]string{"ID", "Description", "Start Time", "Old Duration", "New Duration"})
 
 	lo.ForEach(timeEntries, func(entry TimeEntry, _ int) {
+		if entry.Duration < 0 { // currently running entry
+			return
+		}
+
 		oldDuration := entry.Stop.Sub(entry.Start)
 		newDuration := roundUp(oldDuration, rounding)
 		if oldDuration == 0 || oldDuration == newDuration {
@@ -74,18 +80,16 @@ func roundEntries(client *resty.Client, apply bool, rounding, timeframe time.Dur
 			oldDuration.String(),
 		}
 		if apply {
-			out, err := json.Marshal(struct {
-				PatchEntry `json:"time_entry"`
-			}{
+			out, err := json.Marshal(
 				PatchEntry{
-					Duration: int(newDuration / time.Second),
-				},
-			})
+					Duration:    int(newDuration / time.Second),
+					CreatedWith: "https://github.com/elwin/toggler",
+				})
 			if err != nil {
 				log.Fatal(err) // TODO change to return
 			}
 
-			_, err = client.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v8/time_entries/%d", entry.ID))
+			_, err = client.R().SetBody(out).Put(fmt.Sprintf("https://api.track.toggl.com/api/v9/workspaces/%d/time_entries/%d", entry.WorkspaceId, entry.ID))
 			if err != nil {
 				log.Fatal(err) // TODO change to return
 			}
@@ -105,11 +109,13 @@ func roundEntries(client *resty.Client, apply bool, rounding, timeframe time.Dur
 
 func fetchTimeEntries(client *resty.Client, timeframe time.Duration) ([]TimeEntry, error) {
 	var timeEntries []TimeEntry
-	startTime := time.Now().Add(-timeframe)
+	endTime := time.Now()
+	startTime := endTime.Add(-timeframe)
 	params := url.Values{}
 	params.Add("start_date", startTime.Format(time.RFC3339))
+	params.Add("end_date", endTime.Format(time.RFC3339))
 
-	_, err := client.R().SetResult(&timeEntries).Get("https://api.track.toggl.com/api/v8/time_entries?" + params.Encode())
+	_, err := client.R().SetResult(&timeEntries).Get("https://api.track.toggl.com/api/v9/me/time_entries?" + params.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +312,7 @@ func main() {
 		Action: func(ctx *cli.Context) error {
 			return cli.ShowAppHelp(ctx)
 		},
+		EnableBashCompletion: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "api_token",

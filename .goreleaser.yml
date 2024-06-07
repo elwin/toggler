@@ -22,7 +22,7 @@ changelog:
     - '^docs:'
     - '^test:'
 brews:
-  - tap:
+  - repository:
       owner: elwin
       name: homebrew-tools
 
@@ -38,3 +38,4 @@ snapcrafts:
     summary: Toggl
     description: "Tool to interact with Toggl (currently just rounding)"
     publish: true
+    confinement: strict
